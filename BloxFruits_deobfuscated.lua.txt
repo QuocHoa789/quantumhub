@@ -2740,6 +2740,10 @@ Restock: %s
 		end)
 
 		tbl8.MobsNextSpawn = function(arg, arg2)
+			if not arg2 or arg2 == "" then
+				return
+			end
+
 			if tbl8.NextSpawnCooldown[arg2] then
 				return task.wait()
 			end
@@ -2747,16 +2751,41 @@ Restock: %s
 			task.wait(1)
 
 			if not tbl8.SpawnCache[arg2] then
-				local fortBuilderReplicatedSpawnPositi = v4:FindFirstChild("FortBuilderReplicatedSpawnPositionsFolder")
-				local v19 = next
-				local children, v20 = fortBuilderReplicatedSpawnPositi:GetChildren()
+				-- FIX: this used to index a nil folder (and throw) when the spawn position
+				-- folder was missing, leaving the cooldown flag set forever -> the farm
+				-- stopped walking to monsters completely. Look the folder up in both
+				-- Workspace and ReplicatedStorage, cache the lookup and never let an
+				-- error here lock the spawn system again.
+				tbl8.SpawnFolderCache = tbl8.SpawnFolderCache or { Folders = {}, LastScan = 0 }
 
-				for _, v21 in v19, children, v20 do
-					if v21:IsA("BasePart") then
-						tbl8.SpawnCache[v21.Name] = tbl8.SpawnCache[v21.Name] or {}
-						table.insert(tbl8.SpawnCache[v21.Name], v21.CFrame)
-					end
+				local folderCache = tbl8.SpawnFolderCache
+
+				if #folderCache.Folders == 0 and tick() - folderCache.LastScan >= 10 then
+					folderCache.LastScan = tick()
+
+					pcall(function()
+						local folderName = "FortBuilderReplicatedSpawnPositionsFolder"
+
+						for _, root in ipairs({ v2, v4 }) do
+							local folder = root:FindFirstChild(folderName) or root:FindFirstChild(folderName, true)
+
+							if folder and not table.find(folderCache.Folders, folder) then
+								folderCache.Folders[#folderCache.Folders + 1] = folder
+							end
+						end
+					end)
 				end
+
+				pcall(function()
+					for _, folder in ipairs(folderCache.Folders) do
+						for _, v21 in ipairs(folder:GetChildren()) do
+							if v21:IsA("BasePart") then
+								tbl8.SpawnCache[v21.Name] = tbl8.SpawnCache[v21.Name] or {}
+								table.insert(tbl8.SpawnCache[v21.Name], v21.CFrame)
+							end
+						end
+					end
+				end)
 			end
 
 			local v19 = tbl8.SpawnCache[arg2]
@@ -2962,9 +2991,48 @@ Restock: %s
 			local questData = GuideModule.Data.QuestData
 
 			if questData.Task then
-				local v19 = table.pack(a_1())
-				if v19[1] then
-					return tostring(v19[2])
+				-- FIX: the deobfuscated build called an undefined global here (`a_1`),
+				-- so this function raised every time a quest was active. The level farm
+				-- loop is wrapped in pcall, so the error was silent and the bot stayed
+				-- at the quest NPC right after accepting a quest. Extract safely instead.
+				local ok, result = pcall(function()
+					local taskData = questData.Task
+
+					if type(taskData) == "string" then
+						return taskData
+					end
+
+					if typeof(taskData) == "Instance" then
+						if taskData.Value ~= nil then
+							return tostring(taskData.Value)
+						end
+
+						return taskData.Name
+					end
+
+					if type(taskData) == "table" then
+						for _, key in ipairs({ "Target", "Mob", "MobName", "TargetName", "QuestTarget", "Name", "Value" }) do
+							local value = taskData[key]
+
+							if value ~= nil then
+								if typeof(value) == "Instance" then
+									return value.Name
+								end
+
+								if type(value) == "string" or type(value) == "number" then
+									return tostring(value)
+								end
+							end
+						end
+					end
+
+					return nil
+				end)
+
+				local mob = ok and result or nil
+
+				if type(mob) == "string" and mob ~= "" and mob ~= "nil" then
+					return mob
 				end
 			end
 
@@ -2984,6 +3052,46 @@ Restock: %s
 				local match = questTitle.Text:match("Defeat%s+%d+%s+(.-)%s+%(") or questTitle.Text:match("Defeat%s+(.-)%s+%(")
 				if match then
 					return match
+				end
+			end
+		end
+
+		return nil
+	end
+
+	ResolveActiveQuestMob = function()
+		-- FIX: resolve the mob of the active quest from every available source and
+		-- verify it against the live world, so the level farm always has a target
+		-- instead of standing still when the guide data does not match a quest entry.
+		local candidates = {}
+		local ok, mob = pcall(GetActiveQuestMob)
+
+		if ok and type(mob) == "string" and mob ~= "" and mob ~= "nil" then
+			candidates[#candidates + 1] = mob
+		end
+
+		local quest = v18 and v18:FindFirstChild("PlayerGui") and v18.PlayerGui:FindFirstChild("Main") and v18.PlayerGui.Main:FindFirstChild("Quest")
+
+		if quest then
+			local container = quest:FindFirstChild("Container")
+			local questTitle = container and container:FindFirstChild("QuestTitle")
+			questTitle = questTitle and questTitle:FindFirstChild("Title")
+
+			if questTitle and questTitle.Text and questTitle.Text ~= "" then
+				local match = questTitle.Text:match("Defeat%s+%d+%s+(.-)%s+%(") or questTitle.Text:match("Defeat%s+(.-)%s+%(")
+
+				if match then
+					candidates[#candidates + 1] = match
+				end
+			end
+		end
+
+		for _, name in ipairs(candidates) do
+			local singular = name:gsub("man$", "m"):gsub("ies$", "y"):gsub("s$", "")
+
+			for _, variant in ipairs({ name, singular, name .. "s" }) do
+				if variant ~= "" and utilities:CheckMon(variant) then
+					return variant
 				end
 			end
 		end
@@ -10192,6 +10300,21 @@ Restock: %s
 
 			if farmMode == "Quest" then
 				if not VerifyQuest(v23) then
+					-- FIX: when the game already has another quest active, GetQuest() returns
+					-- immediately (HasActiveQuest guard), so the farm just stood still after
+					-- accepting the quest. Farm the mob of the active quest instead.
+					local activeMob = ResolveActiveQuestMob()
+
+					if activeMob then
+						local activeEnemies = utilities:GetEnemies(activeMob)
+
+						if activeEnemies then
+							return subFunction:Attack(activeEnemies, true)
+						end
+
+						return utilities:MobsNextSpawn(activeMob)
+					end
+
 					return GetQuest()
 				end
 
@@ -10562,7 +10685,7 @@ Restock: %s
 				if tbl6:FireInvoke("BartiloQuestProgress", "Bartilo") == 3 then
 					if tbl6:FireInvoke("TalkTrevor", "1") ~= 0 then
 						if tbl6:FireInvoke("GetUnlockables").FlamingoAccess == nil then
-							if not utilities:Checkfruit() and getfruitstore() then
+							if not utilities:Checkfruit() and getfruitstore and getfruitstore() then
 								tbl6:FireInvoke("LoadFruit", getfruitstore())
 								task.wait(0.1)
 							else
