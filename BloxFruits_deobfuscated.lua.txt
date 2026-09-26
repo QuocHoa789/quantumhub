@@ -3060,42 +3060,52 @@ Restock: %s
 	end
 
 	ResolveActiveQuestMob = function()
-		-- FIX: resolve the mob of the active quest from every available source and
-		-- verify it against the live world, so the level farm always has a target
-		-- instead of standing still when the guide data does not match a quest entry.
-		local candidates = {}
-		local ok, mob = pcall(GetActiveQuestMob)
-
-		if ok and type(mob) == "string" and mob ~= "" and mob ~= "nil" then
-			candidates[#candidates + 1] = mob
-		end
-
+		-- The visible quest is authoritative; guide data may be stale or contain
+		-- the quest giver instead of the enemy's model name.
 		local quest = v18 and v18:FindFirstChild("PlayerGui") and v18.PlayerGui:FindFirstChild("Main") and v18.PlayerGui.Main:FindFirstChild("Quest")
-
-		if quest then
-			local container = quest:FindFirstChild("Container")
-			local questTitle = container and container:FindFirstChild("QuestTitle")
-			questTitle = questTitle and questTitle:FindFirstChild("Title")
-
-			if questTitle and questTitle.Text and questTitle.Text ~= "" then
-				local match = questTitle.Text:match("Defeat%s+%d+%s+(.-)%s+%(") or questTitle.Text:match("Defeat%s+(.-)%s+%(")
-
-				if match then
-					candidates[#candidates + 1] = match
+		local container = quest and quest:FindFirstChild("Container")
+		local questTitle = container and container:FindFirstChild("QuestTitle")
+		local title = questTitle and questTitle:FindFirstChild("Title")
+		local text = title and title.Text or ""
+		local target = text:match("Defeat%s+%d+%s+(.-)%s+%(") or text:match("Defeat%s+(.-)%s+%(")
+		local candidates = {}
+		if target then
+			candidates[#candidates + 1] = target
+		end
+		local ok, guideMob = pcall(GetActiveQuestMob)
+		if ok and type(guideMob) == "string" and guideMob ~= "" then
+			candidates[#candidates + 1] = guideMob
+		end
+		local seaQuests = flag and quests.Sea_1 or flag2 and quests.Sea_2 or flag3 and quests.Sea_3
+		for _, candidate in ipairs(candidates) do
+			local normalized = candidate:lower():gsub("[^%w]", "")
+			-- Map display plurals to canonical model/spawn names even if no mob
+			-- is currently loaded (CheckMon alone cannot do that).
+			if seaQuests then
+				for _, entry in ipairs(seaQuests) do
+					local names = { entry[3] }
+					for i = 6, #entry do
+						local extra = entry[i]
+						if type(extra) == "table" then
+							names[#names + 1] = extra[1]
+						elseif type(extra) == "string" then
+							names[#names + 1] = extra
+						end
+					end
+					for _, name in ipairs(names) do
+						if type(name) == "string" then
+							local key = name:lower():gsub("[^%w]", "")
+							if key == normalized or key .. "s" == normalized or key .. "es" == normalized or key:gsub("y$", "ies") == normalized then
+								return name
+							end
+						end
+					end
 				end
 			end
-		end
-
-		for _, name in ipairs(candidates) do
-			local singular = name:gsub("man$", "m"):gsub("ies$", "y"):gsub("s$", "")
-
-			for _, variant in ipairs({ name, singular, name .. "s" }) do
-				if variant ~= "" and utilities:CheckMon(variant) then
-					return variant
-				end
+			if utilities:CheckMon(candidate) then
+				return candidate
 			end
 		end
-
 		return nil
 	end
 
@@ -10299,6 +10309,14 @@ Restock: %s
 			end
 
 			if farmMode == "Quest" then
+				local activeMob = HasActiveQuest() and ResolveActiveQuestMob() or nil
+				if activeMob then
+					local activeEnemies = utilities:GetEnemies(activeMob)
+					if activeEnemies then
+						return subFunction:Attack(activeEnemies, true)
+					end
+					return utilities:MobsNextSpawn(activeMob)
+				end
 				if not VerifyQuest(v23) then
 					-- FIX: when the game already has another quest active, GetQuest() returns
 					-- immediately (HasActiveQuest guard), so the farm just stood still after
